@@ -1,5 +1,11 @@
 # 🤖 AI Agents Team — Cérebro de equipe para agentes de IA
 
+<p align="center">
+  <img src="assets/ai-agents-team-hero.png" alt="Ilustração de agentes colaborativos coordenando tarefas no terminal" width="100%" />
+</p>
+
+<p align="center"><strong>Experimento em Python para coordenação de agentes de terminal e decisões colaborativas.</strong></p>
+
 4 agentes de IA de terminal + 1 cérebro de equipe que faz eles **conversarem entre si**
 em vez de só responderem o usuário.
 
