@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+  <title id="title">AI Agents Team em colaboração</title><desc id="desc">Nós de agentes e conexões animadas.</desc>
+  <style>@keyframes dash{to{stroke-dashoffset:-72}}@keyframes node{0%,100%{opacity:.35;transform:scale(.9)}50%{opacity:1;transform:scale(1.14)}}.link{stroke-dasharray:10 12;animation:dash 2.6s linear infinite}.node{transform-box:fill-box;transform-origin:center;animation:node 2.7s ease-in-out infinite}@media(prefers-reduced-motion:reduce){.link,.node{animation:none}}</style>
+  <image href="ai-agents-team-hero.png" width="1280" height="720" preserveAspectRatio="xMidYMid slice"/>
+  <path class="link" d="M830 240L985 330M830 240L875 470M985 330L875 470" fill="none" stroke="#78e9ff" stroke-width="4"/>
+  <g fill="#a3f7e0"><circle class="node" cx="830" cy="240" r="13"/><circle class="node" style="animation-delay:.5s" cx="985" cy="330" r="13"/><circle class="node" style="animation-delay:1s" cx="875" cy="470" r="13"/></g>
+</svg>

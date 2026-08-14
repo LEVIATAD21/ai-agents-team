@@ -1,5 +1,7 @@
 # 🤖 AI Agents Team — Cérebro de equipe para agentes de IA
 
+![Loop visual do AI Agents Team](assets/ai-agents-team-loop.svg)
+
 <p align="center">
   <img src="assets/ai-agents-team-hero.png" alt="Ilustração de agentes colaborativos coordenando tarefas no terminal" width="100%" />
 </p>
