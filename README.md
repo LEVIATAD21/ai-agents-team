@@ -76,3 +76,15 @@ Coloque as chaves com `--config` (ficam em `~/.terminal_ai_config.json`,
 ## 📦 Stack
 
 Python puro (stdlib) — zero dependências. Testado no Android/Termux e Linux.
+
+## Segurança de execução
+
+O NEXUS inicia em **modo seguro**. Nesse modo, comandos são limitados a uma lista pequena de ferramentas de leitura e validação, operadores de shell são recusados, a execução arbitrária de Python permanece desativada e operações de arquivos ficam confinadas ao diretório de trabalho ativo. A instalação automática de pacotes também começa desativada.
+
+O projeto não deve receber chaves, tokens ou arquivos `.env` no repositório. Configure credenciais apenas localmente, conforme o arquivo `.env.example` e as instruções de cada ferramenta.
+
+Para verificar as guardas locais do NEXUS:
+
+```bash
+python3 tests/test_security_policy.py
+```

@@ -3,6 +3,7 @@
 NEXUS - Autonomous Terminal AI Agent
 Adapts to any environment. Plans, executes, verifies, self-corrects.
 """
+# project-provenance: github.com/LEVIATAD21 | machine-readable, non-UI
 import platform
 import os
 import sys
@@ -34,9 +35,10 @@ DEFAULT_CONFIG = {
     "api_key": "",
     "max_tokens": 8192,
     "temperature": 0.7,
-    "max_iterations": 100,
+    "max_iterations": 25,
     "safe_mode": True,
-    "auto_install": True,
+    "auto_install": False,
+    "allow_unrestricted_tools": False,
     "web_search_enabled": True,
 }
 
@@ -102,6 +104,69 @@ def detect_pkg_mgr():
         if shutil_which(mgr[0]):
             return mgr[1]
     return "unknown"
+
+
+# ─── Tool safety policy ───────────────────────────────────────────────────
+MAX_TOOL_TIMEOUT = 60
+MAX_FILE_BYTES = 512 * 1024
+SAFE_EXECUTABLES = {
+    "cat", "cd", "find", "git", "grep", "head", "ls", "node", "npm",
+    "pnpm", "pwd", "python3", "pytest", "sed", "tail", "test", "wc",
+}
+SHELL_META = (";", "|", "&", ">", "<", "`", "\n", "\r")
+HIGH_IMPACT_TOKENS = (
+    "rm ", "mkfs", "dd if=", "sudo ", "shutdown", "reboot", "poweroff",
+    "chmod -r", "chown -r", "curl |", "wget |", "> /dev/sd",
+)
+
+
+def workspace_path(raw_path, cwd):
+    """Resolve a path only when it remains inside the active workspace."""
+    try:
+        root = Path(cwd).resolve()
+        candidate = Path(raw_path).expanduser()
+        resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+        resolved.relative_to(root)
+        if resolved.name == ".env" or resolved.suffix == ".env":
+            return None, "environment files are blocked"
+        return resolved, None
+    except (OSError, ValueError):
+        return None, "path escapes the active workspace"
+
+
+def safe_command_args(command):
+    """Allow a deliberately small, non-shell command subset in safe mode."""
+    if not isinstance(command, str) or not command.strip() or len(command) > 600:
+        return None, "invalid command"
+    if any(marker in command for marker in SHELL_META):
+        return None, "shell operators are blocked in safe mode"
+    if any(token in command.lower() for token in HIGH_IMPACT_TOKENS):
+        return None, "high-impact command is blocked"
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return None, "invalid shell quoting"
+    if not parts or Path(parts[0]).name not in SAFE_EXECUTABLES:
+        return None, "command is not on the safe-mode allowlist"
+    return parts, None
+
+
+def is_high_impact_command(command):
+    return any(token in str(command).lower() for token in HIGH_IMPACT_TOKENS)
+
+
+def allowed_web_url(raw_url):
+    """Reject non-web schemes and obvious local-network destinations."""
+    try:
+        parsed = urllib.parse.urlparse(raw_url)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
+            return None, "only unauthenticated http(s) URLs are allowed"
+        if host == "localhost" or host.endswith(".local") or host.startswith("127."):
+            return None, "local-network URLs are blocked"
+        return parsed.geturl(), None
+    except (TypeError, ValueError):
+        return None, "invalid URL"
 
 # ─── Config ───────────────────────────────────────────────────────────────
 
@@ -349,13 +414,19 @@ def run_tool(tool_name, args, env, cfg):
     try:
         if tool_name == "execute":
             cmd = args.get("command", "")
-            timeout = args.get("timeout", 60)
-            is_termux = env.get("is_termux", False)
-            dangerous = any(x in cmd for x in ["rm -rf /", "dd if=", "mkfs.", "format ", "> /dev/sd"])
-            if cfg["safe_mode"] and dangerous and not is_termux:
-                return f"[BLOCKED by safe mode: potentially destructive command]"
+            timeout = min(max(int(args.get("timeout", 60)), 1), MAX_TOOL_TIMEOUT)
             try:
-                proc = subprocess.run(cmd, shell=True, cwd=env["cwd"], capture_output=True, text=True, timeout=timeout)
+                if cfg.get("safe_mode", True):
+                    command_args, policy_error = safe_command_args(cmd)
+                    if policy_error:
+                        return f"[BLOCKED by safe mode: {policy_error}]"
+                    proc = subprocess.run(command_args, shell=False, cwd=env["cwd"], capture_output=True, text=True, timeout=timeout)
+                else:
+                    if not cfg.get("allow_unrestricted_tools", False):
+                        return "[BLOCKED: unrestricted tools require explicit configuration]"
+                    if is_high_impact_command(cmd):
+                        return "[BLOCKED: high-impact commands are never executed autonomously]"
+                    proc = subprocess.run(cmd, shell=True, cwd=env["cwd"], capture_output=True, text=True, timeout=timeout)
                 out = proc.stdout or ""
                 err = proc.stderr or ""
                 result = out[:8000]
@@ -368,27 +439,30 @@ def run_tool(tool_name, args, env, cfg):
                 result = f"[ERROR: {e}]"
 
         elif tool_name == "execute_python":
-            code = args.get("code", "")
-            try:
-                local_vars = {"env": env}
-                exec(code, local_vars)
-                result = local_vars.get("_result", str(local_vars))
-            except Exception as e:
-                result = f"[PYTHON ERROR: {e}]\n{traceback.format_exc()[:1000]}"
+            if cfg.get("safe_mode", True):
+                return "[BLOCKED by safe mode: arbitrary Python execution is disabled]"
+            return "[BLOCKED: arbitrary Python execution requires an audited plugin implementation]"
 
         elif tool_name == "write_file":
-            path = os.path.join(env["cwd"], args.get("path", ""))
+            path, policy_error = workspace_path(args.get("path", ""), env["cwd"])
+            if policy_error:
+                return f"[BLOCKED: {policy_error}]"
             content = args.get("content", "")
+            if not isinstance(content, str) or len(content.encode("utf-8")) > MAX_FILE_BYTES:
+                return "[BLOCKED: invalid or oversized file content]"
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             with open(path, "w") as f:
                 f.write(content)
             result = f"Written {len(content)} bytes to {path}"
 
         elif tool_name == "read_file":
-            path = args.get("path", "")
-            if not os.path.isabs(path): path = os.path.join(env["cwd"], path)
-            max_lines = args.get("max_lines", 100)
+            path, policy_error = workspace_path(args.get("path", ""), env["cwd"])
+            if policy_error:
+                return f"[BLOCKED: {policy_error}]"
+            max_lines = min(max(int(args.get("max_lines", 100)), 1), 500)
             if os.path.exists(path):
+                if os.path.getsize(path) > MAX_FILE_BYTES:
+                    return "[BLOCKED: file exceeds the safe read limit]"
                 with open(path) as f:
                     lines = f.readlines()
                 result = "".join(lines[:max_lines])
@@ -397,19 +471,25 @@ def run_tool(tool_name, args, env, cfg):
                 result = f"[NOT FOUND: {path}]"
 
         elif tool_name == "append_file":
-            path = args.get("path", "")
-            if not os.path.isabs(path): path = os.path.join(env["cwd"], path)
+            path, policy_error = workspace_path(args.get("path", ""), env["cwd"])
+            if policy_error:
+                return f"[BLOCKED: {policy_error}]"
             content = args.get("content", "")
+            if not isinstance(content, str) or len(content.encode("utf-8")) > MAX_FILE_BYTES:
+                return "[BLOCKED: invalid or oversized file content]"
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             with open(path, "a") as f:
                 f.write(content)
             result = f"Appended {len(content)} bytes to {path}"
 
         elif tool_name == "edit_file":
-            path = args.get("path", "")
-            if not os.path.isabs(path): path = os.path.join(env["cwd"], path)
+            path, policy_error = workspace_path(args.get("path", ""), env["cwd"])
+            if policy_error:
+                return f"[BLOCKED: {policy_error}]"
             old, new = args.get("old", ""), args.get("new", "")
             if os.path.exists(path):
+                if os.path.getsize(path) > MAX_FILE_BYTES:
+                    return "[BLOCKED: file exceeds the safe edit limit]"
                 with open(path) as f:
                     content = f.read()
                 if old in content:
@@ -423,8 +503,9 @@ def run_tool(tool_name, args, env, cfg):
                 result = f"[NOT FOUND: {path}]"
 
         elif tool_name == "read_dir":
-            path = args.get("path", ".")
-            if not os.path.isabs(path): path = os.path.join(env["cwd"], path)
+            path, policy_error = workspace_path(args.get("path", "."), env["cwd"])
+            if policy_error:
+                return f"[BLOCKED: {policy_error}]"
             try:
                 items = os.listdir(path)
                 result = "\n".join(sorted(items)[:100])
@@ -433,34 +514,59 @@ def run_tool(tool_name, args, env, cfg):
 
         elif tool_name == "search_files":
             pattern = args.get("pattern", "")
-            spath = args.get("path", env["cwd"])
+            spath, policy_error = workspace_path(args.get("path", "."), env["cwd"])
+            if policy_error:
+                return f"[BLOCKED: {policy_error}]"
             try:
                 import glob as glob_mod
-                matches = glob_mod.glob(pattern, root_dir=spath, recursive=True) if hasattr(glob_mod, "glob") else []
-                if not matches:
-                    result = subprocess.run(f"find . -name '{pattern}' 2>/dev/null | head -50", shell=True, cwd=spath, capture_output=True, text=True, timeout=10).stdout or "(no matches)"
-                else:
-                    result = "\n".join(matches[:50])
-            except:
-                result = subprocess.run(f"find . -name '{pattern}' 2>/dev/null | head -50", shell=True, cwd=spath, capture_output=True, text=True, timeout=10).stdout or "(no matches)"
+                if not isinstance(pattern, str) or len(pattern) > 160:
+                    return "[BLOCKED: invalid search pattern]"
+                matches = glob_mod.glob(pattern, root_dir=str(spath), recursive=True)
+                result = "\n".join(matches[:50]) if matches else "(no matches)"
+            except (OSError, ValueError) as e:
+                result = f"[SEARCH ERROR: {e}]"
 
         elif tool_name == "grep":
             pattern = args.get("pattern", "")
-            spath = args.get("path", env["cwd"])
+            spath, policy_error = workspace_path(args.get("path", "."), env["cwd"])
+            if policy_error:
+                return f"[BLOCKED: {policy_error}]"
             include = args.get("include", "")
-            cmd = f"grep -rn '{pattern}' {spath} 2>/dev/null | head -50"
-            if include: cmd = f"grep -rn --include='{include}' '{pattern}' {spath} 2>/dev/null | head -50"
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10).stdout or "(no matches)"
+            if not isinstance(pattern, str) or len(pattern) > 160:
+                return "[BLOCKED: invalid grep pattern]"
+            if include and (not isinstance(include, str) or len(include) > 80):
+                return "[BLOCKED: invalid file filter]"
+            try:
+                matcher = re.compile(pattern)
+                hits = []
+                root = Path(spath).resolve()
+                for candidate in root.rglob(include or "*"):
+                    if len(hits) >= 50:
+                        break
+                    if not candidate.is_file() or candidate.is_symlink() or candidate.stat().st_size > MAX_FILE_BYTES:
+                        continue
+                    try:
+                        candidate.resolve().relative_to(root)
+                        with candidate.open(errors="replace") as f:
+                            for line_number, line in enumerate(f, start=1):
+                                if matcher.search(line):
+                                    hits.append(f"{candidate.relative_to(root)}:{line_number}:{line.rstrip()[:400]}")
+                                    if len(hits) >= 50:
+                                        break
+                    except (OSError, ValueError):
+                        continue
+                result = "\n".join(hits) if hits else "(no matches)"
+            except re.error as e:
+                result = f"[GREP ERROR: invalid regex: {e}]"
 
         elif tool_name == "fetch_url":
-            url = args.get("url", "")
+            url, policy_error = allowed_web_url(args.get("url", ""))
+            if policy_error:
+                return f"[BLOCKED: {policy_error}]"
             try:
-                ctx = ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, context=ctx, timeout=20) as resp:
-                    content = resp.read().decode("utf-8", errors="replace")
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    content = resp.read(200_000).decode("utf-8", errors="replace")
                     # Strip HTML tags for cleaner output
                     content = re.sub(r'<[^>]+>', ' ', content)
                     content = re.sub(r'\s+', ' ', content).strip()
@@ -475,12 +581,9 @@ def run_tool(tool_name, args, env, cfg):
             else:
                 try:
                     url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
-                    ctx = ssl.create_default_context()
-                    ctx.check_hostname = False
-                    ctx.verify_mode = ssl.CERT_NONE
                     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(req, context=ctx, timeout=20) as resp:
-                        html = resp.read().decode("utf-8", errors="replace")
+                    with urllib.request.urlopen(req, timeout=20) as resp:
+                        html = resp.read(400_000).decode("utf-8", errors="replace")
                     # Extract result snippets
                     snippets = re.findall(r'class="result__snippet">(.*?)</(?:a|span|div)', html, re.DOTALL)
                     links = re.findall(r'class="result__url"[^>]*>(.*?)</a>', html, re.DOTALL)
@@ -497,6 +600,10 @@ def run_tool(tool_name, args, env, cfg):
 
         elif tool_name == "install_package":
             name = args.get("name", "")
+            if cfg.get("safe_mode", True) or not cfg.get("auto_install", False):
+                return "[BLOCKED by policy: package installation requires a user-approved configuration]"
+            if not re.fullmatch(r"[A-Za-z0-9@._+/-]{1,120}", str(name)):
+                return "[BLOCKED: invalid package name]"
             pm = env.get("pkg_mgr", "apt")
             if pm == "pkg":
                 cmd = f"pkg install -y {name}"
@@ -529,6 +636,8 @@ def run_tool(tool_name, args, env, cfg):
             result = f"[PLAN]\n" + "\n".join(f"  {i+1}. {s}" for i, s in enumerate(steps))
 
         elif tool_name == "verify":
+            if cfg.get("safe_mode", True):
+                return "[BLOCKED by safe mode: verification commands must be run explicitly by the operator]"
             checks = args.get("checks", [])
             results = []
             for check in checks:
