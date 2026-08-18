@@ -1,3 +1,5 @@
+![Motion Banner](assets/motion-banner.gif)
+
 # 🤖 AI Agents Team — Cérebro de equipe para agentes de IA
 
 ![Loop visual do AI Agents Team](assets/ai-agents-team-loop.svg)
